@@ -1,0 +1,33 @@
+ # Python
+ __pycache__/
+ *.py[cod]
+ *$py.class
+ *.so
+ .Python
+ env/
+ venv/
+ ENV/
+ .venv
+
+ # Project specific
+ input/raw/*
+ output/*
+ models/*.mlmodel
+ ground_truth/images/*
+ *.log
+ .DS_Store
+
+ # Keep directory structure
+ !input/raw/.gitkeep
+ !output/.gitkeep
+ !models/.gitkeep
+ !ground_truth/images/.gitkeep
+
+ # IDE
+ .vscode/
+ .idea/
+ *.swp
+ *.swo
+
+ # Experiment tracking
+ wandb/
