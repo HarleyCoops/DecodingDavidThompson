@@ -1,33 +1,49 @@
-from kraken import rpred
-from kraken.lib import models
+import pytesseract
 from PIL import Image
 import json
 from pathlib import Path
 import yaml
+import os
 
 class OCRProcessor:
     def __init__(self, config_path="config/config.yaml"):
-        with open(config_path, "r") as f:
-            self.config = yaml.safe_load(f)["ocr"]
-        self.model = None
-
-    def load_model(self, model_path=None):
-        if model_path is None:
-            model_path = self.config["default_model"]
-        self.model = models.load_any(model_path)
+        # Set the Tesseract path if it's not in your system PATH
+        # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+        
+        # Load config if exists
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                self.config = yaml.safe_load(f).get("ocr", {})
+        else:
+            self.config = {}
 
     def process_line(self, image_path):
-        img = Image.open(image_path)
-        pred_it = rpred.rpred(self.model, img, None, None)
-        results = []
-        for pred in pred_it:
-            results.append({"text": pred.prediction, "confidence": pred.confidence})
-        return results
+        """Process a single line image with Tesseract OCR."""
+        try:
+            img = Image.open(image_path)
+            # Use Tesseract to do OCR on the image
+            text = pytesseract.image_to_string(img, config='--psm 7')
+            return [{"text": text.strip(), "confidence": 1.0}]
+        except Exception as e:
+            print(f"Error processing {image_path}: {str(e)}")
+            return [{"text": "", "confidence": 0.0}]
 
     def process_directory(self, input_dir, output_file):
+        """Process all images in a directory and save results to a file."""
         input_dir = Path(input_dir)
         output_file = Path(output_file)
         output_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        results = {}
+        for img_path in input_dir.glob("*.png"):
+            line_results = self.process_line(img_path)
+            results[img_path.name] = line_results[0] if line_results else {"text": "", "confidence": 0.0}
+        
+        # Save results as JSON
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(results, f, indent=2, ensure_ascii=False)
+        
+        return results
 
         if self.model is None:
             self.load_model()

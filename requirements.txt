@@ -6,7 +6,7 @@ scikit-image==0.23.*
 pillow==10.*
 
 # OCR engine
-kraken==3.*
+pytesseract==0.3.10
 
 # Utilities
 pyyaml==6.*
