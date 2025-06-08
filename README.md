@@ -155,6 +155,14 @@ python scripts/pipeline.py --input input/raw/ --output output/ --batch
 python scripts/train.py --ground-truth ground_truth/ --output models/custom/
 ```
 
+### Demo with Sample Image
+
+To try the pipeline on the included sample page run:
+
+```bash
+python scripts/run_sample.py
+```
+
 ## Results & Impact
 
 ### Transcription Accuracy
