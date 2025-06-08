@@ -1,0 +1,664 @@
+# David Thompson Transcription Pipeline
+
+A comprehensive OCR pipeline for transcribing David Thompson's handwritten manuscripts using computer vision and machine learning techniques.
+
+## Project Overview
+
+This pipeline processes scanned images of handwritten text through:
+1. Image preprocessing and enhancement
+2. Line segmentation
+3. OCR using Kraken with custom-trained models
+4. Output formatting and validation
+
+## System Requirements
+
+### Prerequisites
+
+| Component | Version | Notes |
+|-----------|---------|-------|
+| Ubuntu (WSL) | 22.04 LTS | Other Linux distros OK; Windows native if Tesseract + Kraken wheels build |
+| Python | 3.11 (recommended) | Any 3.9+ works if opencv-python-headless wheel exists |
+| venv | built-in | Don't mix conda; Kraken wheels assume vanilla pip |
+
+### System Dependencies
+
+```bash
+# Update system and install required libraries
+sudo apt update && sudo apt install -y \
+    git \
+    libjpeg-turbo8-dev \
+    libtiff-dev \
+    libpng-dev \
+    libfreetype6-dev \
+    pkg-config \
+    libleptonica-dev
+```
+
+## Repository Structure
+
+```
+thompson-transcription/
+├── README.md
+├── requirements.txt
+├── setup.py
+├── .gitignore
+├── input/                    # Source images
+│   ├── raw/                 # Original scans
+│   └── preprocessed/        # Enhanced images
+├── output/
+│   ├── lines/               # Segmented line images
+│   ├── ocr/                 # OCR results
+│   └── final/               # Post-processed output
+├── models/                   # Trained Kraken models
+│   └── .gitkeep
+├── ground_truth/            # Training data
+│   ├── images/
+│   └── transcriptions.tsv
+├── scripts/
+│   ├── __init__.py
+│   ├── preprocess.py        # Image enhancement
+│   ├── segment.py           # Line segmentation
+│   ├── ocr.py              # OCR processing
+│   ├── train.py            # Model training
+│   └── pipeline.py         # Full pipeline
+├── config/
+│   └── config.yaml         # Pipeline configuration
+├── tests/
+│   └── test_pipeline.py
+└── docs/
+    ├── usage.md
+    └── training.md
+```
+
+## Installation
+
+### 1. Clone Repository
+
+```bash
+git clone https://github.com/yourusername/thompson-transcription.git
+cd thompson-transcription
+```
+
+### 2. Create Virtual Environment
+
+```bash
+# Create and activate virtual environment
+python3 -m venv ~/thompson-env
+source ~/thompson-env/bin/activate
+
+# Upgrade pip
+pip install --upgrade pip
+```
+
+### 3. Install Python Dependencies
+
+Create `requirements.txt`:
+
+```txt
+# Core image processing
+opencv-python-headless==4.11.*
+opencv-contrib-python==4.11.*
+numpy==1.26.*
+scikit-image==0.23.*
+pillow==10.*
+
+# OCR engine
+kraken==3.*
+
+# Utilities
+pyyaml==6.*
+tqdm==4.*
+pandas==2.*
+
+# Optional: experiment tracking
+wandb
+
+# Development
+pytest==7.*
+black==23.*
+flake8==6.*
+```
+
+Install:
+
+```bash
+pip install -r requirements.txt
+
+# If opencv-contrib-python fails:
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+```
+
+## Configuration
+
+Create `config/config.yaml`:
+
+```yaml
+# Image preprocessing settings
+preprocessing:
+  clahe:
+    clip_limit: 3.0
+    tile_grid_size: [8, 8]
+  
+  threshold:
+    method: "niblack"
+    block_size: 51
+    k: -0.2
+  
+  morphology:
+    guide_removal_kernel: [1, 25]
+    line_closing_kernel: [120, 3]
+
+# Line segmentation
+segmentation:
+  min_line_height: 20
+  max_line_height: 200
+  horizontal_margin: 10
+
+# OCR settings
+ocr:
+  default_model: "en_best.mlmodel"
+  custom_model: "models/thompson_latest.mlmodel"
+  confidence_threshold: 0.8
+
+# Output settings
+output:
+  format: "txt"  # txt, json, or xml
+  include_confidence: true
+  preserve_line_breaks: true
+```
+
+## Core Scripts
+
+### 1. Preprocessing Script (`scripts/preprocess.py`)
+
+```python
+import cv2
+import numpy as np
+import os
+import yaml
+from pathlib import Path
+
+class ImagePreprocessor:
+    def __init__(self, config_path="config/config.yaml"):
+        with open(config_path, 'r') as f:
+            self.config = yaml.safe_load(f)['preprocessing']
+    
+    def enhance_image(self, image_path):
+        """Apply CLAHE enhancement to improve contrast"""
+        img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+        
+        clahe = cv2.createCLAHE(
+            clipLimit=self.config['clahe']['clip_limit'],
+            tileGridSize=tuple(self.config['clahe']['tile_grid_size'])
+        )
+        return clahe.apply(img)
+    
+    def threshold_image(self, img):
+        """Apply adaptive thresholding"""
+        return cv2.ximgproc.niBlackThreshold(
+            img, 255,
+            cv2.THRESH_BINARY_INV,
+            blockSize=self.config['threshold']['block_size'],
+            k=self.config['threshold']['k']
+        )
+    
+    def remove_guidelines(self, binary_img):
+        """Remove horizontal guidelines from ruled paper"""
+        kernel_v = cv2.getStructuringElement(
+            cv2.MORPH_RECT, 
+            tuple(self.config['morphology']['guide_removal_kernel'])
+        )
+        guides = cv2.morphologyEx(binary_img, cv2.MORPH_OPEN, kernel_v)
+        return cv2.bitwise_and(binary_img, binary_img, mask=cv2.bitwise_not(guides))
+    
+    def process(self, input_path, output_path):
+        """Full preprocessing pipeline"""
+        img = self.enhance_image(input_path)
+        binary = self.threshold_image(img)
+        clean = self.remove_guidelines(binary)
+        
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(output_path), clean)
+        
+        return img, clean  # Return both for line segmentation
+```
+
+### 2. Line Segmentation (`scripts/segment.py`)
+
+```python
+import cv2
+import numpy as np
+from skimage import measure
+from pathlib import Path
+import yaml
+
+class LineSegmenter:
+    def __init__(self, config_path="config/config.yaml"):
+        with open(config_path, 'r') as f:
+            self.config = yaml.safe_load(f)
+    
+    def segment_lines(self, original_img, binary_img, output_dir):
+        """Extract individual text lines"""
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Horizontal closing to merge words into lines
+        kernel_h = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            tuple(self.config['preprocessing']['morphology']['line_closing_kernel'])
+        )
+        h_close = cv2.morphologyEx(binary_img, cv2.MORPH_CLOSE, kernel_h)
+        
+        # Find connected components
+        labels = measure.label(h_close, connectivity=2)
+        regions = measure.regionprops(labels)
+        
+        # Sort by vertical position
+        regions = sorted(regions, key=lambda r: r.bbox[0])
+        
+        # Extract and save lines
+        lines = []
+        seg_config = self.config['segmentation']
+        
+        for idx, region in enumerate(regions):
+            y0, x0, y1, x1 = region.bbox
+            height = y1 - y0
+            
+            # Filter by height
+            if seg_config['min_line_height'] <= height <= seg_config['max_line_height']:
+                # Add horizontal margin
+                margin = seg_config['horizontal_margin']
+                x0 = max(0, x0 - margin)
+                x1 = min(original_img.shape[1], x1 + margin)
+                
+                line_img = original_img[y0:y1, x0:x1]
+                line_path = output_dir / f"line_{idx+1:03d}.png"
+                cv2.imwrite(str(line_path), line_img)
+                lines.append(line_path)
+        
+        print(f"Extracted {len(lines)} lines to {output_dir}")
+        return lines
+```
+
+### 3. OCR Processing (`scripts/ocr.py`)
+
+```python
+from kraken import rpred
+from kraken.lib import models
+from PIL import Image
+import json
+from pathlib import Path
+import yaml
+
+class OCRProcessor:
+    def __init__(self, config_path="config/config.yaml"):
+        with open(config_path, 'r') as f:
+            self.config = yaml.safe_load(f)['ocr']
+        self.model = None
+    
+    def load_model(self, model_path=None):
+        """Load Kraken model"""
+        if model_path is None:
+            model_path = self.config['default_model']
+        
+        self.model = models.load_any(model_path)
+    
+    def process_line(self, image_path):
+        """OCR a single line image"""
+        img = Image.open(image_path)
+        
+        # Get predictions
+        pred_it = rpred.rpred(self.model, img, None, None)
+        
+        results = []
+        for pred in pred_it:
+            results.append({
+                'text': pred.prediction,
+                'confidence': pred.confidence
+            })
+        
+        return results
+    
+    def process_directory(self, input_dir, output_file):
+        """Process all lines in a directory"""
+        input_dir = Path(input_dir)
+        output_file = Path(output_file)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        if self.model is None:
+            self.load_model()
+        
+        all_results = []
+        line_files = sorted(input_dir.glob("*.png"))
+        
+        for line_file in line_files:
+            result = self.process_line(line_file)
+            if result:
+                all_results.append({
+                    'file': line_file.name,
+                    'text': result[0]['text'],
+                    'confidence': result[0]['confidence']
+                })
+        
+        # Save results
+        if output_file.suffix == '.json':
+            with open(output_file, 'w') as f:
+                json.dump(all_results, f, indent=2)
+        else:
+            with open(output_file, 'w') as f:
+                for result in all_results:
+                    if result['confidence'] >= self.config['confidence_threshold']:
+                        f.write(result['text'] + '\n')
+        
+        return all_results
+```
+
+### 4. Full Pipeline (`scripts/pipeline.py`)
+
+```python
+#!/usr/bin/env python3
+import argparse
+from pathlib import Path
+from preprocess import ImagePreprocessor
+from segment import LineSegmenter
+from ocr import OCRProcessor
+import yaml
+
+def run_pipeline(input_image, output_dir, config_path="config/config.yaml"):
+    """Run the complete transcription pipeline"""
+    
+    # Setup paths
+    input_path = Path(input_image)
+    output_dir = Path(output_dir)
+    
+    # Initialize components
+    preprocessor = ImagePreprocessor(config_path)
+    segmenter = LineSegmenter(config_path)
+    ocr = OCRProcessor(config_path)
+    
+    print(f"Processing {input_path.name}...")
+    
+    # 1. Preprocess
+    print("1. Preprocessing image...")
+    preprocessed_path = output_dir / "preprocessed" / f"{input_path.stem}_processed.png"
+    original_img, binary_img = preprocessor.process(input_path, preprocessed_path)
+    
+    # 2. Segment lines
+    print("2. Segmenting lines...")
+    lines_dir = output_dir / "lines" / input_path.stem
+    line_images = segmenter.segment_lines(original_img, binary_img, lines_dir)
+    
+    # 3. OCR
+    print("3. Running OCR...")
+    ocr_output = output_dir / "ocr" / f"{input_path.stem}.txt"
+    results = ocr.process_directory(lines_dir, ocr_output)
+    
+    print(f"\nPipeline complete! Results saved to {ocr_output}")
+    return results
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="David Thompson Transcription Pipeline")
+    parser.add_argument("input", help="Input image file")
+    parser.add_argument("-o", "--output", default="output", help="Output directory")
+    parser.add_argument("-c", "--config", default="config/config.yaml", help="Config file")
+    
+    args = parser.parse_args()
+    run_pipeline(args.input, args.output, args.config)
+```
+
+## Usage
+
+### Basic Usage
+
+```bash
+# Process a single image
+python scripts/pipeline.py input/raw/page_001.png
+
+# Process with custom output directory
+python scripts/pipeline.py input/raw/page_001.png -o results/
+
+# Use custom configuration
+python scripts/pipeline.py input/raw/page_001.png -c config/custom.yaml
+```
+
+### Batch Processing
+
+Create `scripts/batch_process.py`:
+
+```python
+#!/usr/bin/env python3
+import argparse
+from pathlib import Path
+from pipeline import run_pipeline
+from tqdm import tqdm
+
+def batch_process(input_dir, output_dir, config_path="config/config.yaml"):
+    """Process all images in a directory"""
+    input_dir = Path(input_dir)
+    output_dir = Path(output_dir)
+    
+    # Find all image files
+    image_files = list(input_dir.glob("*.png")) + list(input_dir.glob("*.jpg"))
+    
+    print(f"Found {len(image_files)} images to process")
+    
+    for img_file in tqdm(image_files):
+        try:
+            run_pipeline(img_file, output_dir, config_path)
+        except Exception as e:
+            print(f"\nError processing {img_file.name}: {e}")
+            continue
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Batch process images")
+    parser.add_argument("input_dir", help="Directory containing images")
+    parser.add_argument("-o", "--output", default="output", help="Output directory")
+    parser.add_argument("-c", "--config", default="config/config.yaml", help="Config file")
+    
+    args = parser.parse_args()
+    batch_process(args.input_dir, args.output, args.config)
+```
+
+## Model Training
+
+### Preparing Ground Truth
+
+1. Create ground truth data:
+
+```bash
+# Create TSV file with format: path<TAB>transcription
+echo -e "path\ttranscription" > ground_truth/transcriptions.tsv
+echo -e "output/lines/line_01.png\tWith a few Pines on the hills that..." >> ground_truth/transcriptions.tsv
+```
+
+2. Train custom model:
+
+```bash
+kraken train \
+    -f ground_truth/transcriptions.tsv \
+    -o models/thompson_v1.mlmodel \
+    --epochs 10 \
+    --aug \
+    --workers 4
+```
+
+### Training Script (`scripts/train.py`)
+
+```python
+#!/usr/bin/env python3
+import subprocess
+import argparse
+from pathlib import Path
+
+def train_model(ground_truth_file, output_name, epochs=10):
+    """Train a custom Kraken model"""
+    
+    # Ensure output directory exists
+    output_path = Path(f"models/{output_name}.mlmodel")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    cmd = [
+        "kraken", "train",
+        "-f", str(ground_truth_file),
+        "-o", str(output_path),
+        "--epochs", str(epochs),
+        "--aug",  # Data augmentation
+        "--workers", "4"
+    ]
+    
+    print(f"Training model: {output_name}")
+    print(f"Command: {' '.join(cmd)}")
+    
+    subprocess.run(cmd)
+    
+    print(f"\nModel saved to: {output_path}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train custom OCR model")
+    parser.add_argument("ground_truth", help="Ground truth TSV file")
+    parser.add_argument("-n", "--name", required=True, help="Model name")
+    parser.add_argument("-e", "--epochs", type=int, default=10, help="Training epochs")
+    
+    args = parser.parse_args()
+    train_model(args.ground_truth, args.name, args.epochs)
+```
+
+## Testing
+
+Create `tests/test_pipeline.py`:
+
+```python
+import pytest
+from pathlib import Path
+import sys
+sys.path.append(str(Path(__file__).parent.parent))
+
+from scripts.preprocess import ImagePreprocessor
+from scripts.segment import LineSegmenter
+from scripts.ocr import OCRProcessor
+
+def test_preprocessing():
+    """Test image preprocessing"""
+    preprocessor = ImagePreprocessor()
+    # Add test implementation
+    assert True
+
+def test_segmentation():
+    """Test line segmentation"""
+    segmenter = LineSegmenter()
+    # Add test implementation
+    assert True
+
+def test_ocr():
+    """Test OCR processing"""
+    ocr = OCRProcessor()
+    # Add test implementation
+    assert True
+```
+
+## Git Configuration
+
+Create `.gitignore`:
+
+```gitignore
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Project specific
+input/raw/*
+output/*
+models/*.mlmodel
+ground_truth/images/*
+*.log
+.DS_Store
+
+# Keep directory structure
+!input/raw/.gitkeep
+!output/.gitkeep
+!models/.gitkeep
+!ground_truth/images/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Experiment tracking
+wandb/
+```
+
+## Troubleshooting
+
+### Common Issues and Solutions
+
+| Problem | Solution |
+|---------|----------|
+| Only 1 line extracted | Lower horizontal-closing kernel width (120 → 80) in config |
+| Guide-line fragments remain | Increase vertical kernel height (25 → 35) or run second erosion |
+| Kraken misreads numbers | Fine-tune with numeric-heavy ground truth |
+| CUDA not found error | Install `kraken[cuda]` only with GPU; otherwise use CPU |
+| Poor OCR accuracy | Train custom model with more ground truth data |
+| Memory issues with large images | Process in tiles or reduce image resolution |
+
+### Performance Optimization
+
+1. **GPU Acceleration** (if available):
+   ```bash
+   pip install kraken[cuda]
+   ```
+
+2. **Parallel Processing**:
+   - Use multiprocessing for batch operations
+   - Process multiple lines simultaneously
+
+3. **Caching**:
+   - Cache preprocessed images
+   - Store model in memory for batch processing
+
+## Next Steps
+
+1. **Data Collection**:
+   - Scan more manuscript pages
+   - Create comprehensive ground truth dataset
+
+2. **Model Improvement**:
+   - Iterative training with corrected outputs
+   - Experiment with different architectures
+
+3. **Post-processing**:
+   - Spell checking
+   - Context-aware corrections
+   - Format preservation
+
+4. **Integration**:
+   - Web interface for uploads
+   - API for programmatic access
+   - Export to various formats (TEI, JSON, etc.)
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit changes (`git commit -m 'Add amazing feature'`)
+4. Push to branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## License
+
+[Choose appropriate license - MIT, GPL, etc.]
+
+## Acknowledgments
+
+- Kraken OCR engine
+- OpenCV community
+- Historical manuscript digitization community
