@@ -1,0 +1,26 @@
+preprocessing:
+  clahe:
+    clip_limit: 3.0
+    tile_grid_size: [8, 8]
+  threshold:
+    method: niblack
+    block_size: 51
+    k: -0.2
+  morphology:
+    guide_removal_kernel: [1, 25]
+    line_closing_kernel: [120, 3]
+
+segmentation:
+  min_line_height: 20
+  max_line_height: 200
+  horizontal_margin: 10
+
+ocr:
+  default_model: en_best.mlmodel
+  custom_model: models/thompson_latest.mlmodel
+  confidence_threshold: 0.8
+
+output:
+  format: txt
+  include_confidence: true
+  preserve_line_breaks: true
