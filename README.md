@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Historical Manuscript Sample](docs/sample_manuscript.png)
+![Historical Manuscript Sample](docs/DavidThompsonSample.jpg)
 
 *A sample page from David Thompson's handwritten manuscripts - the starting point for our digital transcription journey*
 
