@@ -133,11 +133,6 @@ DecodingDavidThompson/
    pip install -r requirements.txt
    ```
 
-4. **Download base models**
-   ```bash
-   python scripts/download_models.py
-   ```
-
 ### Basic Usage
 
 **Process a single manuscript page:**
