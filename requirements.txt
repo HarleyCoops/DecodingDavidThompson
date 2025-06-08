@@ -1,14 +1,21 @@
+# Core image processing
 opencv-python-headless==4.11.*
 opencv-contrib-python==4.11.*
 numpy==1.26.*
 scikit-image==0.23.*
 pillow==10.*
+
+# OCR engine
 kraken==3.*
+
+# Utilities
 pyyaml==6.*
 tqdm==4.*
 pandas==2.*
-# Optional
+
+# Optional: experiment tracking
 wandb
+
 # Development
 pytest==7.*
 black==23.*
